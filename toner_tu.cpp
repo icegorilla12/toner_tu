@@ -243,6 +243,10 @@ void integrate( vector<vector<double>> &particle_density_t,vector<vector<double>
 
 }
 
+void update_eta(vector<vector<double>> &rho,vector<vector<double>> &rho_target,vector<vector<double>> &eta_old, vector<vector<double>> &eta_new,vector<vector<double>> &activity_field,vector<vector<vector<double>>> &nu){
+    
+}
+
 
 
 
