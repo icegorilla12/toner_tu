@@ -13,22 +13,40 @@
 
 using namespace std;
 
-constexpr int timesteps = 20000;
-constexpr double lambda_constant = 0.3;
+constexpr int timesteps = 5000;
+constexpr double lambda_constant = 0.8;
 constexpr double PI = 3.14159265358979323846;
-constexpr double delta_t = 0.5;
+constexpr double delta_t = 0.1;
 constexpr double D = 1;
 constexpr double polarization_ini_mag = 0.1;
 constexpr double density_mean  = 1.07;
 constexpr double rho_c = 1;
-constexpr double activity_constant = 0.1;
+constexpr double activity_constant = 0.05;
 constexpr double K = 1;
-constexpr double C = 1;
+constexpr double C = 0.1;
 constexpr double A = 1;
 constexpr double B = 1;
 
 int get_periodic_index(int i, int size) {
     return (i % size + size) % size; 
+}
+
+void readvectors(string folder_path, vector<vector<double>> &particle_density, vector<vector<vector<double>>> &tau, int iter, int Ny, int Nx){
+    ifstream inFile(folder_path+"particle_density_"+to_string(iter)+".bin", std::ios::binary);
+    for (int i = 0; i < Ny; ++i) {
+        inFile.read(reinterpret_cast<char*>(particle_density[i].data()), Nx * sizeof(double));
+    }
+    inFile.close();
+
+    inFile.open(folder_path+"tau_"+to_string(iter)+".bin", std::ios::binary);
+
+    for (int i = 0; i < Ny; ++i) {
+        for (int j = 0; j < Nx; ++j) {
+            inFile.read(reinterpret_cast<char*>(tau[i][j].data()), 2 * sizeof(double));
+        }
+    }
+    inFile.close();
+
 }
 
 void savevectors(vector<vector<double>> &particle_density, vector<vector<vector<double>>> &polarization_field, vector<vector<vector<double>>> &tau,string folder_path, int iter){
@@ -266,9 +284,9 @@ void update_eta(vector<vector<double>> &rho,vector<vector<double>> &rho_target,v
       result[i][j] = C*(rho[i][j] - rho_target[i][j]);
       result[i][j]-= eta_lap[i][j];
       result[i][j]-= activity_field[i][j]*activity_field[i][j]*nu_div[i][j];
-      result[i][j]+= ((-1/rho_c)+(-2/pow(rho[i][j],3)-1/(pow(rho[i][j],2)*rho_c))*((tau[i][j][0]*tau[i][j][0]+tau[i][j][1]*tau[i][j][1])))*(nu[i][j][0]*tau[i][j][0] + nu[i][j][1]*nu[i][j][1]);
+      result[i][j]+= ((-1/rho_c)+(-2/pow(rho[i][j],3)-1/(pow(rho[i][j],2)*rho_c))*((tau[i][j][0]*tau[i][j][0]+tau[i][j][1]*tau[i][j][1])))*(nu[i][j][0]*tau[i][j][0] + nu[i][j][1]*tau[i][j][1]);
       eta_new[i][j] = eta_old[i][j]-delta_t*result[i][j];
-    }
+    } 
   }
 }
 
@@ -295,14 +313,14 @@ void lambda_terms_bck(vector<vector<vector<double>>> &nu,vector<vector<vector<do
   }
   for(int i=0;i<Ny;i++){
     for(int j=0;j<Nx;j++){
-      vec3D_return[i][j][0] = 2*nu[i][j][0]*del_tau_yy[i][j]-tau[i][j][0]*del_nu_xx[i][j]+tau[i][j][1]*del_nu_xy[i][j]-tau[i][j][0]*del_nu_yy[i][j]-nu[i][j][1]*del_tau_yx[i][j];
-      vec3D_return[i][j][1] = 2*nu[i][j][1]*del_tau_xx[i][j]-tau[i][j][1]*del_nu_yy[i][j]+tau[i][j][0]*del_nu_yx[i][j]-tau[i][j][1]*del_nu_xx[i][j]-nu[i][j][0]*del_tau_xy[i][j];
+      vec3D_return[i][j][0] = -tau[i][j][0]*del_nu_yy[i][j]+2*nu[i][j][0]*del_tau_yy[i][j]-tau[i][j][0]*del_nu_xx[i][j] - tau[i][j][1]*del_nu_yx[i][j]+tau[i][j][1]*del_nu_xy[i][j]-2*nu[i][j][1]*del_tau_yx[i][j];
+      vec3D_return[i][j][1] = -tau[i][j][1]*del_nu_xx[i][j]-tau[i][j][1]*del_nu_yy[i][j]+2*nu[i][j][1]*del_tau_xx[i][j]-2*nu[i][j][0]*del_tau_xy[i][j]-tau[i][j][0]*del_nu_xy[i][j]+tau[i][j][0]*del_nu_yx[i][j];
     }
   }
   return;
 }
 
-double cost_function(vector<vector<vector<double>>> &tau,vector<vector<vector<double>>> &tau_target, vector<vector<double>> &activity_field,vector<vector<double>> &rho,vector<vector<double>> &rho_target, int Nx, int Ny, double spacing){
+double cost_function(vector<vector<vector<double>>> &tau,vector<vector<vector<double>>> &tau_target, vector<vector<double>> &activity_field,vector<vector<double>> &activity_field_baseline,vector<vector<double>> &rho,vector<vector<double>> &rho_target, int Nx, int Ny, double spacing){
   double cost = 0;
   vector<vector<double>> act_field_sq(Ny, vector<double>(Nx, -1));
   for(int i=0;i<Ny;i++){
@@ -314,17 +332,17 @@ double cost_function(vector<vector<vector<double>>> &tau,vector<vector<vector<do
   gradient(act_field_sq,act_field_sq_grad,Nx,Ny,spacing);
   for(int i=0;i<Ny;i++){
     for(int j=0;j<Nx;j++){
-      cost+=(pow(pow(activity_field[i][j],2)-pow(activity_field[i][j],2),2))*A/2;
+      cost+=(pow(pow(activity_field[i][j],2)-pow(activity_field_baseline[i][j],2),2))*A/2;
       cost+=(pow(rho_target[i][j]-rho[i][j],2))*C/2;
       cost+=(pow(tau_target[i][j][0]-tau[i][j][0],2)+pow(tau_target[i][j][1]-tau[i][j][1],2))*D/2;
       cost+=(act_field_sq_grad[i][j][0]*act_field_sq_grad[i][j][0] + act_field_sq_grad[i][j][1]*act_field_sq_grad[i][j][1])*B/2;
     }
   }
+  return cost;
 }
 
 void update_nu(vector<vector<vector<double>>> &tau,vector<vector<double>> &activity_field,vector<vector<vector<double>>> &tau_target, vector<vector<vector<double>>> &nu_old, vector<vector<vector<double>>> &nu_new,vector<vector<double>> &eta, vector<vector<double>> &rho, int Nx, int Ny, double spacing){
   vector<vector<vector<double>>> result(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
-
   vector<vector<vector<double>>> nu_lap(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
   laplacian(nu_old,nu_lap,Nx,Ny,spacing);
   vector<vector<vector<double>>> eta_grad(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
@@ -336,7 +354,7 @@ void update_nu(vector<vector<vector<double>>> &tau,vector<vector<double>> &activ
       for(int k=0;k<2;k++){
           result[i][j][k] = D*(tau[i][j][k]-tau_target[i][j][k]);
           result[i][j][k]+= (1-rho[i][j]/rho_c+(1+rho[i][j]/rho_c)*((tau[i][j][0]*tau[i][j][0]+tau[i][j][1]*tau[i][j][1]))/pow(rho[i][j],2))*nu_old[i][j][k];
-          result[i][j][k]+= ((1+rho[i][j]/rho_c)/pow(rho[i][j],2))*tau[i][j][k]*(tau[i][j][0]*nu_old[i][j][0]+tau[i][j][1]*nu_old[i][j][1]);
+          result[i][j][k]+= 2*((1+rho[i][j]/rho_c)/pow(rho[i][j],2))*tau[i][j][k]*(tau[i][j][0]*nu_old[i][j][0]+tau[i][j][1]*nu_old[i][j][1]);
           result[i][j][k]-=lambda_constant*(lambda_terms_vector[i][j][k]);
           result[i][j][k]-=nu_lap[i][j][k];
           result[i][j][k]-=pow(activity_field[i][j],2)*(eta_grad[i][j][k]);
@@ -366,14 +384,35 @@ int main(){
       cout << e.what() << "\n";
       throw e;
   }
-  initialize_grid(particle_density_t,density_mean,Nx,Ny);
+  // initialize_grid(particle_density_t,density_mean,Nx,Ny);
   vector<vector<vector<double>>> polarization_field(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
-  initialize_3Dgrid(polarization_field,Nx,Ny);
+  // initialize_3Dgrid(polarization_field,Nx,Ny);
+  vector<vector<double>> activity_field_baseline(Ny, vector<double>(Nx, -1));
+  update_activity(particle_density_t,activity_field_baseline,rho_c,Nx,Ny);
   vector<vector<double>> activity_field(Ny, vector<double>(Nx, -1));
-  update_activity(particle_density_t,activity_field,rho_c,Nx,Ny);
+  static mt19937 g(time(nullptr));  
+  double mean_dist = 0;
+  double stddev = 0.001;
+  normal_distribution<double> dist(mean_dist, stddev);
+  for(int i=0;i<Ny;i++){
+    for(int j=0;j<Nx;j++){
+      activity_field[i][j] = activity_field_baseline[i][j] + dist(g);
+    }
+  }
   vector<vector<vector<double>>> tau_t(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
   vector<vector<vector<vector<double>>>> tau_times(timesteps,vector<vector<vector<double>>>(Ny,vector<vector<double>>(Nx, vector<double>(2, -1))));
-  tau_calculate(tau_t,polarization_field,particle_density_t,Nx,Ny);
+  // tau_calculate(tau_t,polarization_field,particle_density_t,Nx,Ny);
+  readvectors("C:\\PhD\\Work\\Aster2\\",particle_density_t,tau_t,19999,Ny,Nx);
+
+  double rho_eps = 1e-6;
+  for(int i=0;i<Ny;i++){
+    for(int j=0;j<Nx;j++){
+      double r = max(particle_density_t[i][j], rho_eps);
+      for(int k=0;k<2;k++){
+        polarization_field[i][j][k] = tau_t[i][j][k]/r;
+      }
+    }
+  }
   vector<vector<vector<double>>> omeg_tau(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
   calculate_omegtau(tau_t,activity_field,omeg_tau,Nx,Ny);
   vector<vector<vector<double>>> lambda_etc(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
@@ -382,9 +421,9 @@ int main(){
   vector<vector<double>> particle_density_t1(Ny, vector<double>(Nx, -1));
   vector<vector<vector<double>>> tau_t1(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
 
-
   for(int t=0;t<timesteps;t++){
-
+    particle_density_times[t] = particle_density_t;
+    tau_times[t] = tau_t;
     if(t%500==0 || t==timesteps-1){
       double sum = 0;
       if(t%10==0){
@@ -396,10 +435,7 @@ int main(){
         cout << sum << endl;
       }
       
-      // savevectors(particle_density_t,polarization_field,tau_t,folder_path,t);
-      particle_density_times[t] = particle_density_t;
-      tau_times[t] = tau_t;
-
+      savevectors(particle_density_t,polarization_field,tau_t,folder_path,t);
     }
     
     integrate(particle_density_t,particle_density_t1,activity_field,tau_t,tau_t1,omeg_tau,lambda_etc,Nx,Ny,spacing);
@@ -430,18 +466,31 @@ int main(){
     lambda_terms(lambda_etc,tau_t,Nx,Ny,spacing);
   }
 
-  vector<vector<vector<double>>> nu_t(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
+  cout << "Forward propagation completed" << '\n';
+
+  vector<vector<vector<double>>> nu_t(Ny,vector<vector<double>>(Nx, vector<double>(2, 0)));
   vector<vector<vector<double>>> nu_t1(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
-  vector<vector<double>> eta_t(Ny, vector<double>(Nx, -1));
+  vector<vector<double>> eta_t(Ny, vector<double>(Nx, 0));
   vector<vector<double>> eta_t1(Ny, vector<double>(Nx, -1));
   vector<vector<double>> rho_target(Ny, vector<double>(Nx, -1));
   vector<vector<vector<double>>> tau_target(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
-  vector<vector<double>> w_0(Ny, vector<double>(Nx, -1));
+  readvectors("C:\\PhD\\Work\\Aster1\\", rho_target, tau_target, 19999,Ny,Nx);
 
-  for(int t=0;t<timesteps;t++){
-    lambda_terms_bck(nu_t,lambda_etc,tau_times[t],Nx,Ny,spacing);
-    update_eta(particle_density_times[t],rho_target, eta_t,eta_t1,activity_field,nu_t,tau_times[t],Nx,Ny,spacing);
-    update_nu(tau_times[t],activity_field,tau_target, nu_t,nu_t1,eta_t,particle_density_times[t],Nx,Ny,spacing);
+  for(int t=timesteps-1;t>=1;t--){
+    lambda_terms_bck(nu_t,lambda_etc,tau_times[t-1],Nx,Ny,spacing);
+    update_eta(particle_density_times[t-1],rho_target, eta_t,eta_t1,activity_field,nu_t,tau_times[t-1],Nx,Ny,spacing);
+    update_nu(tau_times[t-1],activity_field,tau_target, nu_t,nu_t1,eta_t,particle_density_times[t-1],Nx,Ny,spacing);
+    if(t%500==0 || t==timesteps-1){
+      double sum = 0;
+      if(t%10==0){
+        for(int i=0;i<Ny;i++){
+          for(int j=0;j<Nx;j++){
+            sum+=eta_t[i][j];
+          }
+        }
+        cout << sum << endl;
+      }
+    }
     for(int i=0;i<Ny;i++){
       for(int j=0;j<Nx;j++){
         for(int k=0;k<2;k++){
