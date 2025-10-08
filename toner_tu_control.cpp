@@ -10,25 +10,89 @@
 #include<fstream>
 #include<cstdlib>
 #include<array>
+#include<Eigen/Sparse>
+
+using Eigen::SparseMatrix;
+using Eigen::VectorXd;
+using Eigen::ConjugateGradient;
+using Eigen::Triplet;
 
 using namespace std;
 
-constexpr int timesteps = 5000;
 constexpr double lambda_constant = 0.8;
+constexpr double activity_constant = 0.05;
 constexpr double PI = 3.14159265358979323846;
-constexpr double delta_t = 0.1;
+
+constexpr int timesteps = 2000;
+constexpr double delta_t = 0.5;
+// constexpr double learning_rate = 0.01;
+constexpr int num_iters = 50;
+
 constexpr double D = 1;
 constexpr double polarization_ini_mag = 0.1;
 constexpr double density_mean  = 1.07;
 constexpr double rho_c = 1;
-constexpr double activity_constant = 0.05;
+
 constexpr double K = 1;
-constexpr double C = 0.1;
-constexpr double A = 1;
+constexpr double C = 1.2;
+constexpr double E = 1.2;
 constexpr double B = 1;
+constexpr double A = 1;
 
 int get_periodic_index(int i, int size) {
     return (i % size + size) % size; 
+}
+
+void shift_2d_array(vector<vector<double>>& arr) {
+
+    const int Ny = arr.size();    
+    const int Nx = arr[0].size(); 
+    vector<vector<double>> temp_arr = arr;
+    int dy = 4; 
+    int dx = -4; 
+    for (int i = 0; i < Ny; ++i) {
+        for (int j = 0; j < Nx; ++j) {
+            int source_i = i - dy;
+            int source_j = j - dx;
+            int wrapped_i = (source_i % Ny + Ny) % Ny;
+            int wrapped_j = (source_j % Nx + Nx) % Nx;
+            temp_arr[i][j] = arr[wrapped_i][wrapped_j];
+        }
+    }
+    arr = temp_arr;
+}
+
+void shift_3d_array(vector<vector<vector<double>>>& arr) {
+    if (arr.empty() || arr[0].empty() || arr[0][0].empty()) {
+        cerr << "Error: 3D Array is empty or malformed." << endl;
+        return;
+    }
+
+    const int Nz = arr.size();     
+    const int Ny = arr[0].size();  
+    const int Nx = arr[0][0].size(); 
+
+    vector<vector<vector<double>>> temp_arr = arr;
+
+    int dy = 4; 
+    int dx = -4; 
+        
+    for (int i = 0; i < Nz; ++i) { 
+        for (int j = 0; j < Ny; ++j) { 
+            for (int k = 0; k < Nx; ++k) { 
+                
+                int source_i = i - dy;
+                int source_j = j - dx;
+
+  
+                int wrapped_i = (source_i % Nz + Nz) % Nz;
+                int wrapped_j = (source_j % Ny + Ny) % Ny;
+
+                temp_arr[i][j][k] = arr[wrapped_i][wrapped_j][k];
+            }
+        }
+    }
+    arr = temp_arr;
 }
 
 void readvectors(string folder_path, vector<vector<double>> &particle_density, vector<vector<vector<double>>> &tau, int iter, int Ny, int Nx){
@@ -47,6 +111,19 @@ void readvectors(string folder_path, vector<vector<double>> &particle_density, v
     }
     inFile.close();
 
+}
+
+void save_activity_field(vector<vector<vector<double>>> &activity_field, string folder_path, int iter){
+    string activity_field_path = "activity_field_final"+to_string(iter)+".bin";
+
+    ofstream outFile(folder_path+activity_field_path, ios::binary);
+    outFile.open(folder_path+activity_field_path, ios::binary);
+    for (const auto &plane : activity_field) {
+        for (const auto &row : plane) {
+            outFile.write(reinterpret_cast<const char *>(row.data()), row.size() * sizeof(double));
+        }
+    }
+    outFile.close();
 }
 
 void savevectors(vector<vector<double>> &particle_density, vector<vector<vector<double>>> &polarization_field, vector<vector<vector<double>>> &tau,string folder_path, int iter){
@@ -124,10 +201,9 @@ void initialize_3Dgrid(vector<vector<vector<double>>> &grid, int Nx, int Ny){
   return;
 }
 
-void update_activity(vector<vector<double>> &particle_density,vector<vector<double>> &activity_field, double rho_c, int Nx, int Ny){
+void update_activity(vector<vector<double>> &activity_field, double rho_c, int Nx, int Ny){
   for(int i=0;i<Ny;i++){
     for(int j=0;j<Nx;j++){
-        // activity_field[i][j] =particle_density[i][j]-rho_c ;
         activity_field[i][j] = activity_constant;
     }
   }
@@ -236,6 +312,61 @@ void update_rho(vector<vector<double>> &particle_density_t,vector<vector<double>
   }
 }
 
+void update_rho_backward(vector<vector<double>> &particle_density_t,vector<vector<double>> &particle_density_t1, vector<vector<vector<double>>> &omeg_tau, int Nx, int Ny, double spacing)
+{
+    auto idx = [&](int i, int j) { return get_periodic_index(i,Ny) * Nx + get_periodic_index(j,Nx);};
+
+    const int N = Nx * Ny;
+    SparseMatrix<double> A(N, N);
+    vector<Triplet<double>> triplets;
+
+    double coeff_center = 1.0 + 4.0 * delta_t * D / (spacing * spacing);
+    double coeff_neighbor = -delta_t * D / (spacing * spacing);
+
+    for (int i = 0; i < Ny; ++i) {
+        for (int j = 0; j < Nx; ++j) {
+            int k = idx(i, j);
+            triplets.emplace_back(k, k, coeff_center);
+            triplets.emplace_back(k, idx(i - 1, j), coeff_neighbor);
+            triplets.emplace_back(k, idx(i + 1, j), coeff_neighbor);
+            triplets.emplace_back(k, idx(i, j - 1), coeff_neighbor);
+            triplets.emplace_back(k, idx(i, j + 1), coeff_neighbor);
+        }
+    }
+    A.setFromTriplets(triplets.begin(), triplets.end());
+
+  
+    vector<vector<double>> div_omeg_tau(Ny, vector<double>(Nx, 0));
+    divergence(omeg_tau, div_omeg_tau,Nx,Ny,spacing);
+
+    VectorXd rhs(N);
+    for (int i = 0; i < Ny; ++i){
+        for (int j = 0; j < Nx; ++j){
+            rhs[idx(i, j)] = particle_density_t[i][j] - delta_t * div_omeg_tau[i][j];
+        }
+      }
+
+    ConjugateGradient<SparseMatrix<double>, Eigen::Lower | Eigen::Upper> solver;
+    solver.compute(A);
+
+    if (solver.info() != Eigen::Success) {
+        std::cerr << "Matrix factorization failed!" << std::endl;
+        return;
+    }
+
+    VectorXd x = solver.solve(rhs);
+
+    if (solver.info() != Eigen::Success) {
+        std::cerr << "Solver failed to converge!" << std::endl;
+        return;
+    }
+
+    for (int i = 0; i < Ny; ++i)
+        for (int j = 0; j < Nx; ++j)
+            particle_density_t1[i][j] = x[idx(i, j)];
+}
+
+
 void update_tau(vector<vector<vector<double>>> &lambda_terms, vector<vector<vector<double>>> &tau_t,vector<vector<vector<double>>> &tau_t1, vector<vector<double>> &particle_density_t, vector<vector<double>> &activity_field, int Nx, int Ny, double spacing){
   vector<vector<vector<double>>> omeg_rho_3d(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
   vector<vector<vector<double>>> laplacian_grid(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
@@ -259,15 +390,102 @@ void update_tau(vector<vector<vector<double>>> &lambda_terms, vector<vector<vect
       }
     }
   }
-
-
   return;
-
 }
+
+void update_tau_backward(vector<vector<vector<double>>> &lambda_terms, vector<vector<vector<double>>> &tau_t,vector<vector<vector<double>>> &tau_t1, vector<vector<double>> &particle_density_t, vector<vector<double>> &activity_field, int Nx, int Ny, double spacing){
+
+  auto idx = [&](int i, int j) { return get_periodic_index(i,Ny) * Nx + get_periodic_index(j,Nx);};
+  
+  int N = Nx * Ny;
+  
+  vector<vector<vector<double>>> omeg_rho_3d(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
+  vector<vector<double>> omeg_rho_2d(Ny, vector<double>(Nx, -1));
+  
+  for(int i=0; i<Ny; i++){
+    for(int j=0; j<Nx; j++){
+      omeg_rho_2d[i][j] = activity_field[i][j]*particle_density_t[i][j];
+    }
+  }
+  gradient(omeg_rho_2d, omeg_rho_3d, Nx, Ny, spacing);
+  
+
+  double h2 = spacing * spacing;
+  double diag_coef = 1.0 + 4.0 * delta_t * K / h2;
+  double off_coef = -delta_t * K / h2;
+  
+  vector<Triplet<double>> triplets;
+  triplets.reserve(5 * N);
+  
+
+  for (int i = 0; i < Ny; ++i) {
+      for (int j = 0; j < Nx; ++j) {
+          int k = idx(i, j);
+          triplets.emplace_back(k, k, diag_coef);
+          triplets.emplace_back(k, idx(i - 1, j), off_coef);
+          triplets.emplace_back(k, idx(i + 1, j), off_coef);
+          triplets.emplace_back(k, idx(i, j - 1), off_coef);
+          triplets.emplace_back(k, idx(i, j + 1), off_coef);
+      }
+  }
+
+  SparseMatrix<double> A(N, N);
+  A.setFromTriplets(triplets.begin(), triplets.end());
+  
+  ConjugateGradient<SparseMatrix<double>, Eigen::Lower | Eigen::Upper> solver;
+  solver.compute(A);
+  
+  if(solver.info() != Eigen::Success){
+    cerr << "Matrix decomposition failed in update_tau!" << endl;
+    return;
+  }
+  
+  for(int k=0; k<2; k++){
+    VectorXd rhs(N);
+    for(int i=0; i<Ny; i++){
+      for(int j=0; j<Nx; j++){
+        int idx = i*Nx + j;
+        double tau_mag_sq = tau_t[i][j][0]*tau_t[i][j][0] + 
+                           tau_t[i][j][1]*tau_t[i][j][1];
+        
+        double nonlinear_coef = -(1.0 - particle_density_t[i][j]/rho_c + 
+                                  (1.0 + particle_density_t[i][j]/rho_c) * 
+                                  tau_mag_sq / pow(particle_density_t[i][j], 2));
+        
+        double nonlinear_term = nonlinear_coef * tau_t[i][j][k];
+        
+        rhs[idx] = tau_t[i][j][k] + delta_t * (
+          nonlinear_term - 
+          omeg_rho_3d[i][j][k] + 
+          lambda_constant * lambda_terms[i][j][k]
+        );
+      }
+    }
+    
+    VectorXd tau_new_vec = solver.solve(rhs);
+    
+    if(solver.info() != Eigen::Success){
+      cerr << "Solving failed in update_tau for component " << k << endl;
+      cerr << "Iterations: " << solver.iterations() << endl;
+      cerr << "Error: " << solver.error() << endl;
+      return;
+    }
+    
+    for(int i=0; i<Ny; i++){
+      for(int j=0; j<Nx; j++){
+        int idx = i*Nx + j;
+        tau_t1[i][j][k] = tau_new_vec[idx];
+      }
+    }
+  }
+}
+
 
 void integrate( vector<vector<double>> &particle_density_t,vector<vector<double>> &particle_density_t1, vector<vector<double>> &activity_field, vector<vector<vector<double>>> &tau_t, vector<vector<vector<double>>> &tau_t1, vector<vector<vector<double>>> &omeg_tau,vector<vector<vector<double>>> &lambda_terms, int Nx, int Ny, double spacing){
 
+  // update_rho_backward(particle_density_t,particle_density_t1,omeg_tau,Nx,Ny,spacing);
   update_rho(particle_density_t,particle_density_t1,omeg_tau,Nx,Ny,spacing);
+  // update_tau_backward(lambda_terms,tau_t,tau_t1,particle_density_t,activity_field,Nx,Ny,spacing);
   update_tau(lambda_terms,tau_t,tau_t1,particle_density_t,activity_field,Nx,Ny,spacing);
 
 }
@@ -287,6 +505,67 @@ void update_eta(vector<vector<double>> &rho,vector<vector<double>> &rho_target,v
       result[i][j]+= ((-1/rho_c)+(-2/pow(rho[i][j],3)-1/(pow(rho[i][j],2)*rho_c))*((tau[i][j][0]*tau[i][j][0]+tau[i][j][1]*tau[i][j][1])))*(nu[i][j][0]*tau[i][j][0] + nu[i][j][1]*tau[i][j][1]);
       eta_new[i][j] = eta_old[i][j]-delta_t*result[i][j];
     } 
+  }
+}
+
+void update_eta_implicit(vector<vector<double>> &rho,vector<vector<double>> &rho_target,vector<vector<double>> &eta_old, vector<vector<double>> &eta_new,vector<vector<double>> &activity_field,vector<vector<vector<double>>> &nu,
+  vector<vector<vector<double>>> &tau, int Nx, int Ny, double spacing){
+
+
+  auto idx = [&](int i, int j) { return get_periodic_index(i,Ny) * Nx + get_periodic_index(j,Nx);};
+  const int N = Nx * Ny;
+  SparseMatrix<double> A(N, N);
+  vector<Triplet<double>> triplets;
+  double coeff_center = 1.0 + 4.0 * delta_t * D / (spacing * spacing);
+  double coeff_neighbor = -delta_t * D / (spacing * spacing);
+
+  for (int i = 0; i < Ny; ++i) {
+    for (int j = 0; j < Nx; ++j) {
+            int k = idx(i, j);
+            triplets.emplace_back(k, k, coeff_center);
+            triplets.emplace_back(k, idx(i - 1, j), coeff_neighbor);
+            triplets.emplace_back(k, idx(i + 1, j), coeff_neighbor);
+            triplets.emplace_back(k, idx(i, j - 1), coeff_neighbor);
+            triplets.emplace_back(k, idx(i, j + 1), coeff_neighbor);
+        }
+    }
+    A.setFromTriplets(triplets.begin(), triplets.end());
+
+
+  // vector<vector<double>> eta_lap(Ny, vector<double>(Nx, -1));
+  // laplacian_2D(eta_old, eta_lap, Nx,Ny,spacing);
+  vector<vector<double>> nu_div(Ny, vector<double>(Nx, -1));
+  divergence(nu,nu_div,Nx,Ny,spacing);
+  VectorXd rhs(N);
+
+  for (int i = 0; i < Ny; ++i){
+    for (int j = 0; j < Nx; ++j){
+        rhs[idx(i, j)] = +C*(rho[i][j] - rho_target[i][j]);
+        rhs[idx(i, j)] -= activity_field[i][j]*activity_field[i][j]*nu_div[i][j];
+        rhs[idx(i, j)] += ((-1/rho_c)+(-2/pow(rho[i][j],3)-1/(pow(rho[i][j],2)*rho_c))*((tau[i][j][0]*tau[i][j][0]+tau[i][j][1]*tau[i][j][1])))*(nu[i][j][0]*tau[i][j][0] + nu[i][j][1]*tau[i][j][1]);
+        rhs[idx(i,j)]*= -delta_t;
+        rhs[idx(i,j)]+=eta_old[i][j];
+      }
+  }
+  ConjugateGradient<SparseMatrix<double>, Eigen::Lower | Eigen::Upper> solver;
+  solver.compute(A);
+
+  if (solver.info() != Eigen::Success) {
+      std::cerr << "Matrix factorization failed!" << std::endl;
+      return;
+  }
+
+  VectorXd x = solver.solve(rhs);
+
+  if (solver.info() != Eigen::Success) {
+      std::cerr << "Solver failed to converge!" << std::endl;
+      return;
+  }
+
+  for (int i = 0; i < Ny; ++i){
+    for (int j = 0; j < Nx; ++j){
+        eta_new[i][j] = x[idx(i, j)];
+    }
   }
 }
 
@@ -352,7 +631,7 @@ void update_nu(vector<vector<vector<double>>> &tau,vector<vector<double>> &activ
   for(int i=0;i<Ny;i++){
     for(int j=0;j<Nx;j++){
       for(int k=0;k<2;k++){
-          result[i][j][k] = D*(tau[i][j][k]-tau_target[i][j][k]);
+          result[i][j][k] = E*(tau[i][j][k]-tau_target[i][j][k]);
           result[i][j][k]+= (1-rho[i][j]/rho_c+(1+rho[i][j]/rho_c)*((tau[i][j][0]*tau[i][j][0]+tau[i][j][1]*tau[i][j][1]))/pow(rho[i][j],2))*nu_old[i][j][k];
           result[i][j][k]+= 2*((1+rho[i][j]/rho_c)/pow(rho[i][j],2))*tau[i][j][k]*(tau[i][j][0]*nu_old[i][j][0]+tau[i][j][1]*nu_old[i][j][1]);
           result[i][j][k]-=lambda_constant*(lambda_terms_vector[i][j][k]);
@@ -365,6 +644,87 @@ void update_nu(vector<vector<vector<double>>> &tau,vector<vector<double>> &activ
   return;
 }
 
+void update_nu_implicit(vector<vector<vector<double>>> &tau,vector<vector<double>> &activity_field,vector<vector<vector<double>>> &tau_target, vector<vector<vector<double>>> &nu_old, vector<vector<vector<double>>> &nu_new,vector<vector<double>> &eta, vector<vector<double>> &rho, int Nx, int Ny, double spacing){
+
+  auto idx = [&](int i, int j) { return get_periodic_index(i,Ny) * Nx + get_periodic_index(j,Nx);};
+  const int N = Nx * Ny;
+  SparseMatrix<double> A(N, N);
+  vector<Triplet<double>> triplets;
+  double coeff_center = 1.0 + 4.0 * delta_t / (spacing * spacing);
+  double coeff_neighbor = -delta_t  / (spacing * spacing);
+
+  for (int i = 0; i < Ny; ++i) {
+    for (int j = 0; j < Nx; ++j) {
+            int k = idx(i, j);
+            triplets.emplace_back(k, k, coeff_center);
+            triplets.emplace_back(k, idx(i - 1, j), coeff_neighbor);
+            triplets.emplace_back(k, idx(i + 1, j), coeff_neighbor);
+            triplets.emplace_back(k, idx(i, j - 1), coeff_neighbor);
+            triplets.emplace_back(k, idx(i, j + 1), coeff_neighbor);
+        }
+    }
+  A.setFromTriplets(triplets.begin(), triplets.end());
+  
+  ConjugateGradient<SparseMatrix<double>, Eigen::Lower | Eigen::Upper> solver;
+  solver.compute(A);
+
+
+  // vector<vector<vector<double>>> nu_lap(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
+  // laplacian(nu_old,nu_lap,Nx,Ny,spacing);
+  vector<vector<vector<double>>> eta_grad(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
+  gradient(eta,eta_grad,Nx,Ny,spacing);
+  vector<vector<vector<double>>> lambda_terms_vector(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
+  lambda_terms_bck(nu_old,lambda_terms_vector,tau,Nx,Ny,spacing);
+
+  for(int k=0; k<2; k++){
+    VectorXd rhs(N);
+    for (int i = 0; i < Ny; ++i){
+      for (int j = 0; j < Nx; ++j){
+          rhs[idx(i, j)] = +E*(tau[i][j][k]-tau_target[i][j][k]);
+          rhs[idx(i, j)] += (1-rho[i][j]/rho_c+(1+rho[i][j]/rho_c)*((tau[i][j][0]*tau[i][j][0]+tau[i][j][1]*tau[i][j][1]))/pow(rho[i][j],2))*nu_old[i][j][k];
+          rhs[idx(i, j)] += 2*((1+rho[i][j]/rho_c)/pow(rho[i][j],2))*tau[i][j][k]*(tau[i][j][0]*nu_old[i][j][0]+tau[i][j][1]*nu_old[i][j][1]);
+          rhs[idx(i, j)]-=lambda_constant*(lambda_terms_vector[i][j][k]);
+          rhs[idx(i, j)]-=pow(activity_field[i][j],2)*(eta_grad[i][j][k]);
+          rhs[idx(i,j)]*= -delta_t;
+          rhs[idx(i,j)]+=nu_old[i][j][k];
+        }
+    }
+    VectorXd nu_new_vec = solver.solve(rhs);
+    
+    if(solver.info() != Eigen::Success){
+      cerr << "Solving failed in update_nu for component " << k << endl;
+      cerr << "Error: " << solver.error() << endl;
+      return;
+    }
+    
+    for(int i=0; i<Ny; i++){
+      for(int j=0; j<Nx; j++){
+        int grid_idx = i*Nx + j;
+        nu_new[i][j][k] = nu_new_vec[grid_idx];
+      }
+    }
+    
+  }
+  return;
+}
+
+void gradient_weight(vector<vector<double>> &gradients,vector<vector<double>> &activity_field, vector<vector<double>> &activity_field_baseline,vector<vector<double>> &rho, vector<vector<double>> &eta, vector<vector<vector<double>>> &tau, vector<vector<vector<double>>> &nu, int Nx, int Ny, double spacing){
+
+  vector<vector<vector<double>>> eta_grad(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
+  vector<vector<vector<double>>> rho_grad(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
+  vector<vector<double>> activity_field_laplacian(Ny, vector<double>(Nx, -1));
+  laplacian_2D(activity_field,activity_field_laplacian,Nx,Ny,spacing);
+  gradient(rho,rho_grad,Nx,Ny,spacing);
+  gradient(eta, eta_grad,Nx, Ny, spacing);
+  double weight = 0;
+  for(int i=0;i<Ny;i++){
+    for(int j=0;j<Nx;j++){
+      gradients[i][j] = 2*A*activity_field[i][j]*(activity_field[i][j] - activity_field_baseline[i][j])-2*B*activity_field[i][j]*activity_field_laplacian[i][j]-2*activity_field[i][j]*(tau[i][j][0]*eta_grad[i][j][0]+tau[i][j][1]*eta_grad[i][j][1])-2*activity_field[i][j]*(nu[i][j][0]*rho_grad[i][j][0]+nu[i][j][1]*rho_grad[i][j][1]);
+    }
+  }
+
+}
+
 
 
 
@@ -372,10 +732,25 @@ int main(){
   int Nx = 60;
   int Ny = 60;
   double spacing = 2;
+  static mt19937 g(time(nullptr));  
+  double mean_dist = 0;
+  double stddev = 0.001;
+  normal_distribution<double> dist(mean_dist, stddev);
 
-  vector<vector<double>> particle_density_t(Ny, vector<double>(Nx, -1));
-  vector<vector<vector<double>>> particle_density_times(timesteps,vector<vector<double>>(Ny, vector<double>(Nx, -1)));
-  string folder_path = "C:\\PhD\\Work\\Trial1_Control\\";
+  vector<vector<vector<double>>> activity_field_times(timesteps,vector<vector<double>>(Ny, vector<double>(Nx, -1)));
+  vector<vector<double>> activity_field_baseline(Ny, vector<double>(Nx, -1));
+  update_activity(activity_field_baseline,rho_c,Nx,Ny);
+  vector<vector<double>> activity_field(Ny, vector<double>(Nx, -1));
+  for(int i=0;i<Ny;i++){
+    for(int j=0;j<Nx;j++){
+        activity_field[i][j] = activity_field_baseline[i][j];
+      }
+    }
+  for(int t=0;t<timesteps;t++){
+      activity_field_times[t] = activity_field;
+  }
+
+  string folder_path = "C:\\PhD\\Work\\Trial2_Control\\";
   string command = "mkdir "+folder_path;
   try{
       int result = std::system(command.c_str());
@@ -384,75 +759,26 @@ int main(){
       cout << e.what() << "\n";
       throw e;
   }
-  // initialize_grid(particle_density_t,density_mean,Nx,Ny);
-  vector<vector<vector<double>>> polarization_field(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
-  // initialize_3Dgrid(polarization_field,Nx,Ny);
-  vector<vector<double>> activity_field_baseline(Ny, vector<double>(Nx, -1));
-  update_activity(particle_density_t,activity_field_baseline,rho_c,Nx,Ny);
-  vector<vector<double>> activity_field(Ny, vector<double>(Nx, -1));
-  static mt19937 g(time(nullptr));  
-  double mean_dist = 0;
-  double stddev = 0.001;
-  normal_distribution<double> dist(mean_dist, stddev);
-  for(int i=0;i<Ny;i++){
-    for(int j=0;j<Nx;j++){
-      activity_field[i][j] = activity_field_baseline[i][j] + dist(g);
-    }
-  }
-  vector<vector<vector<double>>> tau_t(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
-  vector<vector<vector<vector<double>>>> tau_times(timesteps,vector<vector<vector<double>>>(Ny,vector<vector<double>>(Nx, vector<double>(2, -1))));
-  // tau_calculate(tau_t,polarization_field,particle_density_t,Nx,Ny);
-  readvectors("C:\\PhD\\Work\\Aster2\\",particle_density_t,tau_t,19999,Ny,Nx);
 
-  double rho_eps = 1e-6;
-  for(int i=0;i<Ny;i++){
-    for(int j=0;j<Nx;j++){
-      double r = max(particle_density_t[i][j], rho_eps);
-      for(int k=0;k<2;k++){
-        polarization_field[i][j][k] = tau_t[i][j][k]/r;
-      }
-    }
-  }
-  vector<vector<vector<double>>> omeg_tau(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
-  calculate_omegtau(tau_t,activity_field,omeg_tau,Nx,Ny);
-  vector<vector<vector<double>>> lambda_etc(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
-  lambda_terms(lambda_etc,tau_t,Nx,Ny,spacing);
+  double learning_rate = 0.01;
 
-  vector<vector<double>> particle_density_t1(Ny, vector<double>(Nx, -1));
-  vector<vector<vector<double>>> tau_t1(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
-
-  for(int t=0;t<timesteps;t++){
-    particle_density_times[t] = particle_density_t;
-    tau_times[t] = tau_t;
-    if(t%500==0 || t==timesteps-1){
-      double sum = 0;
-      if(t%10==0){
-        for(int i=0;i<Ny;i++){
-          for(int j=0;j<Nx;j++){
-            sum+=particle_density_t[i][j];
-          }
-        }
-        cout << sum << endl;
-      }
-      
-      savevectors(particle_density_t,polarization_field,tau_t,folder_path,t);
+  for(int iter = 0;iter<num_iters;iter++){
+    if(iter%4==1){
+      learning_rate/=2;
     }
-    
-    integrate(particle_density_t,particle_density_t1,activity_field,tau_t,tau_t1,omeg_tau,lambda_etc,Nx,Ny,spacing);
+    cout << "Iteration Number: " << iter << '\n';
+    vector<vector<double>> particle_density_t(Ny, vector<double>(Nx, -1));
+    vector<vector<vector<double>>> particle_density_times(timesteps,vector<vector<double>>(Ny, vector<double>(Nx, -1)));
+  
+    // initialize_grid(particle_density_t,density_mean,Nx,Ny);
+    vector<vector<vector<double>>> polarization_field(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
+    // initialize_3Dgrid(polarization_field,Nx,Ny);
 
-    for(int i=0;i<Ny;i++){
-      for(int j=0;j<Nx;j++){
-        particle_density_t[i][j] = particle_density_t1[i][j];
-      }
-    }
+    vector<vector<vector<double>>> tau_t(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
+    vector<vector<vector<vector<double>>>> tau_times(timesteps,vector<vector<vector<double>>>(Ny,vector<vector<double>>(Nx, vector<double>(2, -1))));
+    // tau_calculate(tau_t,polarization_field,particle_density_t,Nx,Ny);
+    readvectors("C:\\PhD\\Work\\Aster1\\",particle_density_t,tau_t,19999,Ny,Nx);
 
-    for(int i=0;i<Ny;i++){
-      for(int j=0;j<Nx;j++){
-        for(int k=0;k<2;k++){
-          tau_t[i][j][k] = tau_t1[i][j][k];
-        }
-      }
-    }
     double rho_eps = 1e-6;
     for(int i=0;i<Ny;i++){
       for(int j=0;j<Nx;j++){
@@ -462,46 +788,141 @@ int main(){
         }
       }
     }
-    calculate_omegtau(tau_t,activity_field,omeg_tau,Nx,Ny);
-    lambda_terms(lambda_etc,tau_t,Nx,Ny,spacing);
-  }
+    vector<vector<vector<double>>> omeg_tau(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
+    // calculate_omegtau(tau_t,activity_field_times[0],omeg_tau,Nx,Ny);
+    vector<vector<vector<double>>> lambda_etc(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
+    // lambda_terms(lambda_etc,tau_t,Nx,Ny,spacing);
 
-  cout << "Forward propagation completed" << '\n';
+    vector<vector<double>> particle_density_t1(Ny, vector<double>(Nx, -1));
+    vector<vector<vector<double>>> tau_t1(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
 
-  vector<vector<vector<double>>> nu_t(Ny,vector<vector<double>>(Nx, vector<double>(2, 0)));
-  vector<vector<vector<double>>> nu_t1(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
-  vector<vector<double>> eta_t(Ny, vector<double>(Nx, 0));
-  vector<vector<double>> eta_t1(Ny, vector<double>(Nx, -1));
-  vector<vector<double>> rho_target(Ny, vector<double>(Nx, -1));
-  vector<vector<vector<double>>> tau_target(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
-  readvectors("C:\\PhD\\Work\\Aster1\\", rho_target, tau_target, 19999,Ny,Nx);
+    for(int t=0;t<timesteps;t++){
 
-  for(int t=timesteps-1;t>=1;t--){
-    lambda_terms_bck(nu_t,lambda_etc,tau_times[t-1],Nx,Ny,spacing);
-    update_eta(particle_density_times[t-1],rho_target, eta_t,eta_t1,activity_field,nu_t,tau_times[t-1],Nx,Ny,spacing);
-    update_nu(tau_times[t-1],activity_field,tau_target, nu_t,nu_t1,eta_t,particle_density_times[t-1],Nx,Ny,spacing);
-    if(t%500==0 || t==timesteps-1){
-      double sum = 0;
-      if(t%10==0){
-        for(int i=0;i<Ny;i++){
-          for(int j=0;j<Nx;j++){
-            sum+=eta_t[i][j];
+      particle_density_times[t] = particle_density_t;
+      tau_times[t] = tau_t;
+
+      calculate_omegtau(tau_t,activity_field_times[t],omeg_tau,Nx,Ny);
+      lambda_terms(lambda_etc,tau_t,Nx,Ny,spacing);
+
+      if(iter==num_iters-1 && t%10==0){
+          savevectors(particle_density_t,polarization_field,tau_t,folder_path,t);
+      }
+
+      if(t%1000==0 || t==timesteps-1){
+        double sum = 0;
+        if(t%10==0){
+          for(int i=0;i<Ny;i++){
+            for(int j=0;j<Nx;j++){
+              sum+=particle_density_t[i][j];
+            }
+          }
+          cout << sum << endl;
+        }
+        
+        savevectors(particle_density_t,polarization_field,tau_t,folder_path,t);
+      }
+      
+      integrate(particle_density_t,particle_density_t1,activity_field_times[t],tau_t,tau_t1,omeg_tau,lambda_etc,Nx,Ny,spacing);
+
+      for(int i=0;i<Ny;i++){
+        for(int j=0;j<Nx;j++){
+          particle_density_t[i][j] = particle_density_t1[i][j];
+        }
+      }
+
+      for(int i=0;i<Ny;i++){
+        for(int j=0;j<Nx;j++){
+          for(int k=0;k<2;k++){
+            tau_t[i][j][k] = tau_t1[i][j][k];
           }
         }
-        cout << sum << endl;
       }
-    }
-    for(int i=0;i<Ny;i++){
-      for(int j=0;j<Nx;j++){
-        for(int k=0;k<2;k++){
-          nu_t[i][j][k] = nu_t1[i][j][k];
+      double rho_eps = 1e-6;
+      for(int i=0;i<Ny;i++){
+        for(int j=0;j<Nx;j++){
+          double r = max(particle_density_t[i][j], rho_eps);
+          for(int k=0;k<2;k++){
+            polarization_field[i][j][k] = tau_t[i][j][k]/r;
+          }
         }
       }
     }
-    for(int i=0;i<Ny;i++){
-      for(int j=0;j<Nx;j++){
-        eta_t[i][j] = eta_t1[i][j];
+
+    cout << "Forward propagation completed" << '\n';
+
+    vector<vector<vector<double>>> nu_t(Ny,vector<vector<double>>(Nx, vector<double>(2, 0)));
+    vector<vector<vector<double>>> nu_t1(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
+    vector<vector<double>> eta_t(Ny, vector<double>(Nx, 0));
+    vector<vector<double>> eta_t1(Ny, vector<double>(Nx, -1));
+    vector<vector<double>> rho_target(Ny, vector<double>(Nx, -1));
+    vector<vector<vector<double>>> tau_target(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
+    readvectors("C:\\PhD\\Work\\Aster1\\", rho_target, tau_target, 19999,Ny,Nx);
+    shift_2d_array(rho_target);
+    shift_3d_array(tau_target);
+    savevectors(rho_target,tau_target,tau_target,"C:\\PhD\\Work\\Aster1\\", 101);
+
+    vector<vector<double>> gradients(Ny, vector<double>(Nx));
+
+
+    for(int t=timesteps-1;t>=1;t--){
+      lambda_terms_bck(nu_t,lambda_etc,tau_times[t],Nx,Ny,spacing);
+      update_eta(particle_density_times[t],rho_target, eta_t,eta_t1,activity_field_times[t] ,nu_t,tau_times[t],Nx,Ny,spacing);
+      update_nu(tau_times[t],activity_field_times[t],tau_target, nu_t,nu_t1,eta_t,particle_density_times[t],Nx,Ny,spacing);
+
+      if(t%500==0 || t==timesteps-1){
+        double sum = 0;
+        if(t%10==0){
+          for(int i=0;i<Ny;i++){
+            for(int j=0;j<Nx;j++){
+              sum+=eta_t[i][j];
+            }
+          }
+          cout << sum << endl;
+        }
       }
+      for(int i=0;i<Ny;i++){
+        for(int j=0;j<Nx;j++){
+          for(int k=0;k<2;k++){
+            nu_t[i][j][k] = nu_t1[i][j][k];
+          }
+        }
+      }
+      for(int i=0;i<Ny;i++){
+        for(int j=0;j<Nx;j++){
+          eta_t[i][j] = eta_t1[i][j];
+        }
+      }
+      gradient_weight(gradients,activity_field_times[t] ,activity_field_baseline,particle_density_times[t],eta_t, tau_times[t],nu_t,Nx,Ny,spacing);
+      // if(t%100==0){
+      //   double sum_grads = 0;
+      //   for(int i=0;i<Ny;i++){
+      //     for(int j=0;j<Nx;j++){
+      //       sum_grads += gradients[i][j];
+      //     }
+      //   }
+      //   cout << sum_grads/(60*60) << '\n';
+      // }
+      for(int i=0;i<Ny;i++){
+        for(int j=0;j<Nx;j++){
+          activity_field_times[t][i][j]-= learning_rate*gradients[i][j];
+        }
+      }
+      if(t==1){
+        for(int i=0;i<3;i++){
+          for(int j=0;j<3;j++){
+            cout << activity_field_times[t][i][j] << ' ';
+          }
+        }
+        cout << '\n';
+      }
+
+      if(iter==num_iters-1){
+        save_activity_field(activity_field_times,folder_path,iter);
+      }
+
     }
   }
+    
+  return 0;
+
 }
