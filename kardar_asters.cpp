@@ -13,15 +13,18 @@
 
 using namespace std;
 
-constexpr int Nx = 20;
-constexpr int Ny = 20;
+constexpr int Nx = 60;
+constexpr int Ny = 60;
 constexpr double spacing = 1;
 constexpr int timesteps = 500000;
 constexpr double PI = 3.14159265358979323846;
-constexpr double delta_t = 0.01;
+constexpr double delta_t = 0.05;
 constexpr double polarization_ini_mag = 0.001;
-constexpr double density_mean  = 0.15;
-constexpr double C = 1;
+constexpr double density_mean  = 0.01;
+constexpr double C = 10;
+constexpr double A = 0.5;
+constexpr double B = 0.5;
+constexpr double activity_constant = 0.05;
 
 
 
@@ -117,22 +120,22 @@ void laplacian_2D(vector<vector<double>> &vec_2D, vector<vector<double>> &vec_2D
   }
 }
 
-void update_density(vector<vector<double>> &rho_old, vector<vector<double>> &rho_new,vector<vector<vector<double>>> &polarization_field){
+void update_density(vector<vector<double>> &rho_old, vector<vector<double>> &rho_new,vector<vector<vector<double>>> &polarization_field, vector<vector<double>> &activity_field){
   vector<vector<double>> result(Ny, vector<double>(Nx, -1));
-  vector<vector<vector<double>>> mT(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
+  vector<vector<vector<double>>> wmT(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
   laplacian_2D(rho_old, result);
   for(int i=0;i<Ny;i++){
     for(int j=0;j<Nx;j++){
       for(int k=0;k<2;k++){
-        mT[i][j][k] = rho_old[i][j]*polarization_field[i][j][k];
+        wmT[i][j][k] = rho_old[i][j]*polarization_field[i][j][k]*activity_field[i][j];
       }
     }
   }
-  vector<vector<double>> mTdiv(Ny, vector<double>(Nx, -1));
-  divergence(mT,mTdiv);
+  vector<vector<double>> wmTdiv(Ny, vector<double>(Nx, -1));
+  divergence(wmT,wmTdiv);
   for(int i=0;i<Ny;i++){
     for(int j=0;j<Nx;j++){
-      result[i][j]-=mTdiv[i][j];
+      result[i][j]-=wmTdiv[i][j];
     }
   }
   for(int i=0;i<Ny;i++){
@@ -167,19 +170,38 @@ void non_linear(vector<vector<double>> &rho, vector<vector<vector<double>>> &pol
 
 }
 
-void update_T(vector<vector<double>> &rho, vector<vector<vector<double>>> &polarization_field_old, vector<vector<vector<double>>> &polarization_field_new){
+void update_T(vector<vector<double>> &rho, vector<vector<vector<double>>> &polarization_field_old, vector<vector<vector<double>>> &polarization_field_new, vector<vector<double>> &activity_field){
   vector<vector<vector<double>>> nonlinearterms(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
   non_linear(rho,polarization_field_old, nonlinearterms);
   vector<vector<vector<double>>> result(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
   laplacian(polarization_field_old,result);
+  vector<vector<double>> wrho(Ny, vector<double>(Nx, -1));
+  for(int i=0;i<Ny;i++){
+    for(int j=0;j<Nx;j++){
+      wrho[i][j] = activity_field[i][j]*rho[i][j];
+    }
+  }
+  vector<vector<vector<double>>> divwrho(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
+  gradient(wrho, divwrho);
+  
   for(int i=0;i<Ny;i++){
     for(int j=0;j<Nx;j++){
       for(int k=0;k<2;k++){
         result[i][j][k] = result[i][j][k]*rho[i][j];
         result[i][j][k] += nonlinearterms[i][j][k];
-        result[i][j][k] += C*polarization_field_old[i][j][k]*(1-(polarization_field_old[i][j][0]*polarization_field_old[i][j][0] + polarization_field_old[i][j][1]*polarization_field_old[i][j][1]));
+        result[i][j][k] += polarization_field_old[i][j][k]*C*(1-(polarization_field_old[i][j][0]*polarization_field_old[i][j][0] + polarization_field_old[i][j][1]*polarization_field_old[i][j][1]));
+        result[i][j][k] -= divwrho[i][j][k];
         polarization_field_new[i][j][k] = polarization_field_old[i][j][k] + delta_t*result[i][j][k];
       }
+    }
+  }
+  return;
+}
+
+void update_activity(vector<vector<double>> &activity_field){
+  for(int i=0;i<Ny;i++){
+    for(int j=0;j<Nx;j++){
+        activity_field[i][j] = activity_constant;
     }
   }
   return;
@@ -201,18 +223,20 @@ int main(){
   }
 
   vector<vector<double>> rho_t(Ny, vector<double>(Nx, -1));
+  vector<vector<double>> activity_field(Ny, vector<double>(Nx, -1));
   vector<vector<vector<double>>> polarization_field_t(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
   vector<vector<double>> rho_t1(Ny, vector<double>(Nx, -1));
   vector<vector<vector<double>>> polarization_field_t1(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
   initialize_grid(rho_t,density_mean);
   initialize_3Dgrid(polarization_field_t);
+  update_activity(activity_field);
   
   for(int t = 0; t< timesteps;t++){
     if(t%10000==0){
         savevectors(rho_t, polarization_field_t, folder_path, t);
     }
-    update_density(rho_t,rho_t1,polarization_field_t);
-    update_T(rho_t, polarization_field_t, polarization_field_t1);
+    update_density(rho_t,rho_t1,polarization_field_t, activity_field);
+    update_T(rho_t, polarization_field_t, polarization_field_t1, activity_field);
     for(int i=0;i<Ny;i++){
       for(int j=0;j<Nx;j++){
         polarization_field_t[i][j][0] = polarization_field_t1[i][j][0];
@@ -227,7 +251,7 @@ int main(){
       }
     }
     if(t%10000==0){
-      cout << sum << endl;
+      cout << sum << ' ' << t <<  '\n';
     }
   }
 }
