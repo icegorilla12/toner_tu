@@ -21,15 +21,16 @@ constexpr int Ny = 50;
 constexpr int Lx = 50;
 constexpr int Ly = 50;
 constexpr double spacing = 1;
-constexpr int timesteps = 500000;
+constexpr int timesteps = 100000;
 
 constexpr double delta_t = 0.01;
 
 const double PI = acos(-1.0);
 constexpr double C = 100;
-constexpr double activity_constant = 1;
-constexpr double density_mean  = 0.01;
+constexpr double activity_constant = 0.8;
+constexpr double density_mean  = 0.1;
 constexpr double polarization_ini_mag = 0.001;
+
 
 int get_periodic_index(int i, int size) {
     return (i % size + size) % size; 
@@ -69,17 +70,26 @@ void laplacian(vector<vector<vector<double>>> &vec_3D, vector<vector<vector<doub
 
 
 void initializeGaussian(vector<vector<double>> &particle_density,int N, double sigma, double A = 1.0) {
+
     int cx = N / 2;
     int cy = N / 2;
 
     for (int i = 0; i < N; i++) {
         for (int j = 0; j < N; j++) {
-            int dx = i - cx;
-            int dy = j - cy;
+            int dx = (i - cx);
+            int dy = (j - cy);
             double r2 = dx*dx + dy*dy;
             particle_density[i][j] = 0;
             particle_density[i][j] += A * exp(-r2 / (2.0 * sigma * sigma));
-            particle_density[i][j] += A * exp(-r2 / (2.0 * sigma * sigma));
+        }
+    }
+}
+
+void initializeSinusoid(vector<vector<double>> &particle_density,int N) {
+    for (int i = 0; i < N; i++) {
+        for (int j = 0; j < N; j++) {
+          double x = j * spacing;
+          particle_density[i][j] = sin(2.0 * PI * x / Lx);
         }
     }
 }
@@ -108,6 +118,7 @@ void savevectors(vector<vector<double>> &particle_density, vector<vector<vector<
 
 void update_activity(vector<vector<double>> &activity_field){
   static mt19937 g(time(nullptr));  
+  // static mt19937 g(42); 
   double mean_dist = 0;
   double stddev = 0.01;
   normal_distribution<double> dist(mean_dist, stddev);
@@ -122,6 +133,7 @@ void update_activity(vector<vector<double>> &activity_field){
 
 void initialize_grid(vector<vector<double>> &grid, double mean){
     static mt19937 g(time(nullptr));  
+    // static mt19937 g(42); 
     double mean_dist = 0;
     double stddev = 0.2;
     normal_distribution<double> dist(mean_dist, stddev);
@@ -135,10 +147,12 @@ void initialize_grid(vector<vector<double>> &grid, double mean){
 
 void initialize_3Dgrid(vector<vector<vector<double>>> &grid){
   random_device rd;  
-  mt19937 g(time(nullptr));   
+  mt19937 g(time(nullptr));  
+  // mt19937 g(42); 
   double lower_bound = 0.0;
   double upper_bound = 2*PI;
   uniform_real_distribution<double> dist(lower_bound, upper_bound);   
+  // double angle = dist(g);
   for(int i=0;i<Ny;i++){
     for(int j=0;j<Nx;j++){
       double angle = dist(g);
@@ -161,6 +175,41 @@ void divergence(vector<vector<vector<double>>> &grid, vector<vector<double>> &re
       }
     return;
   }
+
+
+void non_linear(vector<vector<double>> &rho, vector<vector<vector<double>>> &polarization_field, vector<vector<vector<double>>> &result, vector<vector<double>> &activity_field ){
+    
+    vector<vector<vector<double>>> polarization_field_mod(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
+    for(int i=0;i<Ny;i++){
+      for(int j=0;j<Nx;j++){
+        polarization_field_mod[i][j][0] = polarization_field[i][j][0]*activity_field[i][j];
+        polarization_field_mod[i][j][1] = polarization_field[i][j][1]*activity_field[i][j];
+      }
+    }
+  
+    vector<vector<double>> del_t_xx(Ny, vector<double>(Nx, -1));
+    vector<vector<double>> del_t_yx(Ny, vector<double>(Nx, -1));
+    vector<vector<double>> del_t_xy(Ny, vector<double>(Nx, -1));
+    vector<vector<double>> del_t_yy(Ny, vector<double>(Nx, -1));
+    for(int i=0;i<Ny;i++){
+      for(int j=0;j<Nx;j++){
+        del_t_yy[i][j] = (polarization_field_mod[get_periodic_index(i+1,Ny)][j][1]-polarization_field_mod[get_periodic_index(i-1,Ny)][j][1])/(2*spacing);
+        del_t_yx[i][j] = (polarization_field_mod[i][get_periodic_index(j+1,Nx)][1]-polarization_field_mod[i][get_periodic_index(j-1,Nx)][1])/(2*spacing);
+        del_t_xx[i][j] = (polarization_field_mod[i][get_periodic_index(j+1,Nx)][0]-polarization_field_mod[i][get_periodic_index(j-1,Nx)][0])/(2*spacing);
+        del_t_xy[i][j] = (polarization_field_mod[get_periodic_index(i+1,Ny)][j][0]-polarization_field_mod[get_periodic_index(i-1,Ny)][j][0])/(2*spacing);
+      }
+    }
+    vector<vector<vector<double>>> rho_grad(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
+    gradient(rho, rho_grad);
+    for(int i=0;i<Ny;i++){
+      for(int j=0;j<Nx;j++){
+        result[i][j][0] = rho_grad[i][j][0]*del_t_xx[i][j] + rho_grad[i][j][1]*del_t_xy[i][j];
+        result[i][j][1] = rho_grad[i][j][0]*del_t_yx[i][j] + rho_grad[i][j][1]*del_t_yy[i][j];
+      }
+    }
+    return;
+
+}
 
 class SpectralSolver{
   private:
@@ -262,8 +311,8 @@ class SpectralSolver{
           }
 
           fftw_execute_dft_c2r(backward_plan_m, m_hat, m_real);
-          for(int i = 0; i < 10; i++) {
-            for(int j = 0; j < 10; j++) {
+          for(int i = 0; i < Ny; i++) {
+            for(int j = 0; j < Nx; j++) {
               cout << m_real[i*Nx + j]*(1.0/(Nx*Ny)) << ' ';
             }
           }
@@ -293,6 +342,24 @@ class SpectralSolver{
         fftw_execute_dft_r2c(forward_plan_m, m_real, m_hat);
         fftw_execute_dft_r2c(forward_plan_fx, flux_real_x, flux_hat_x);
         fftw_execute_dft_r2c(forward_plan_fy, flux_real_y, flux_hat_y);
+
+        // int cutoff_x = Nx / 3;
+        // int cutoff_y = Ny / 3;
+
+
+        // for (int i = 0; i < Ny; i++) {
+        //   int ky_index = (i <= Ny/2) ? i : i - Ny;
+        //   for (int j = 0; j < Nx/2 + 1; j++) {
+        //       int kx_index = j;
+
+        //       if (abs(kx_index) > cutoff_x || abs(ky_index) > cutoff_y) {
+        //           flux_hat_x[i*(Nx/2 + 1) + j][0] = 0.0;
+        //           flux_hat_x[i*(Nx/2 + 1) + j][1] = 0.0;
+        //           flux_hat_y[i*(Nx/2 + 1) + j][0] = 0.0;
+        //           flux_hat_y[i*(Nx/2 + 1) + j][1] = 0.0;
+        //        }
+        //    }
+        // }
         
         
         double norm = 1.0 / (Nx * Ny);  
@@ -330,6 +397,9 @@ class SpectralSolver{
 
       void update_T_spectral(vector<vector<double>> &m, vector<vector<double>> &omega, vector<vector<vector<double>>> &T, vector<vector<vector<double>>> &T_new, double delta_t) {
 
+          // vector<vector<vector<double>>> nonlinearterms(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
+          // non_linear(m,T, nonlinearterms, omega);
+
           for(int i=0;i<Ny;i++){
             for(int j=0;j<Nx;j++){
               T_new[i][j][0] = 0;
@@ -348,6 +418,8 @@ class SpectralSolver{
                   flux[i][j][1] = omega[i][j] * T[i][j][1];
               }
           }
+          // vector<vector<vector<double>>> result(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
+          // laplacian(flux,result);
     
             for(int i = 0; i < Ny; i++) {
                 for(int j = 0; j < Nx; j++) {
@@ -389,7 +461,23 @@ class SpectralSolver{
                   }
                 }
               fftw_execute_dft_r2c(forward_plan_temp, temp_real, temp_hat);
-              for(int i = 0; i < Ny; i++) {
+
+            // int cutoff_x = Nx / 3;
+            // int cutoff_y = Ny / 3;
+
+
+            // for (int i = 0; i < Ny; i++) {
+            //   int ky_index = (i <= Ny/2) ? i : i - Ny;
+            //   for (int j = 0; j < Nx/2 + 1; j++) {
+            //       int kx_index = j;
+            //       if (abs(kx_index) > cutoff_x || abs(ky_index) > cutoff_y) {
+            //           temp_hat[i*(Nx/2 + 1) + j][0] = 0.0;
+            //           temp_hat[i*(Nx/2 + 1) + j][1] = 0.0;
+            //       }
+            //     } 
+            //   }
+
+            for(int i = 0; i < Ny; i++) {
                 for(int j = 0; j < Nx/2 + 1; j++) {
                     int idx = i*(Nx/2 + 1) + j;
                     
@@ -454,6 +542,22 @@ class SpectralSolver{
                   }
                 }
               fftw_execute_dft_r2c(forward_plan_temp, temp_real, temp_hat);
+
+            // int cutoff_x = Nx / 3;
+            // int cutoff_y = Ny / 3;
+
+
+            // for (int i = 0; i < Ny; i++) {
+            //   int ky_index = (i <= Ny/2) ? i : i - Ny;
+            //   for (int j = 0; j < Nx/2 + 1; j++) {
+            //       int kx_index = j;
+            //       if (abs(kx_index) > cutoff_x || abs(ky_index) > cutoff_y) {
+            //           temp_hat[i*(Nx/2 + 1) + j][0] = 0.0;
+            //           temp_hat[i*(Nx/2 + 1) + j][1] = 0.0;
+            //       }
+            //     } 
+            //   }
+
               for(int i = 0; i < Ny; i++) {
                 for(int j = 0; j < Nx/2 + 1; j++) {
 
@@ -481,6 +585,8 @@ class SpectralSolver{
             for(int k=0;k<2;k++){
               for(int i = 0; i < Ny; i++) {
                 for(int j = 0; j < Nx; j++) {
+                  // T_new[i][j][k] += nonlinearterms[i][j][k];
+                  // T_new[i][j][k]+= result[i][j][k];
                   T_new[i][j][k] += C*T[i][j][k]*(1 -(T[i][j][0]*T[i][j][0] + T[i][j][1]*T[i][j][1]));
                   T_new[i][j][k]*=delta_t;
                   T_new[i][j][k] += T[i][j][k];
@@ -495,7 +601,7 @@ int main(){
 
   cout << "Start" << '\n';
 
-  string folder_path = "C:\\PhD\\Work\\KardarAsterSpectral\\";
+  string folder_path = "C:\\PhD\\Work\\KardarAsterSpectral2\\";
   string command = "mkdir "+folder_path;
 
   try{
@@ -516,14 +622,15 @@ int main(){
   vector<vector<vector<double>>> polarization_field_t1(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
 
   initialize_grid(rho_t,density_mean);
-  // initializeGaussian(rho_t, Nx, 100);
+  // initializeSinusoid(rho_t,Nx);
+  // initializeGaussian(rho_t,Nx,40);
   initialize_3Dgrid(polarization_field_t);
   update_activity(activity_field);
 
   // vector<vector<vector<double>>> result(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
   // gradient(rho_t, result);
-  // for(int i=0;i<10;i++){
-  //   for(int j=0;j<10;j++){
+  // for(int i=0;i<Ny;i++){
+  //   for(int j=0;j<Nx;j++){
   //     cout << result[i][j][0] << ' ';
   //   }
   // }

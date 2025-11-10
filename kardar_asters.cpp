@@ -13,24 +13,40 @@
 
 using namespace std;
 
-constexpr int Nx = 60;
-constexpr int Ny = 60;
+constexpr int Nx = 50;
+constexpr int Ny = 50;
 constexpr double spacing = 1;
-constexpr int timesteps = 500000;
+constexpr int timesteps = 200000;
 constexpr double PI = 3.14159265358979323846;
-constexpr double delta_t = 0.05;
+constexpr double delta_t = 0.01;
 constexpr double polarization_ini_mag = 0.001;
-constexpr double density_mean  = 0.01;
-constexpr double C = 10;
+constexpr double density_mean  = 0.1;
+constexpr double C = 100;
 constexpr double A = 0.5;
 constexpr double B = 0.5;
-constexpr double activity_constant = 0.05;
+constexpr double activity_constant = 1;
 
 
 
 int get_periodic_index(int i, int size) {
     return (i % size + size) % size; 
 }
+
+void update_activity(vector<vector<double>> &activity_field){
+  static mt19937 g(time(nullptr)); 
+  // static mt19937 g(42);  
+  double mean_dist = 0;
+  double stddev = 0.01;
+  normal_distribution<double> dist(mean_dist, stddev);
+  for(int i=0;i<Ny;i++){
+    for(int j=0;j<Nx;j++){
+        activity_field[i][j] = activity_constant + dist(g);
+        // activity_field[i][j] = activity_constant;
+    }
+  }
+  return;
+}
+
 
 void savevectors(vector<vector<double>> &particle_density, vector<vector<vector<double>>> &polarization_field, string folder_path, int iter){
     string particle_density_path = "particle_density_"+to_string(iter)+".bin";
@@ -84,6 +100,7 @@ void laplacian(vector<vector<vector<double>>> &vec_3D, vector<vector<vector<doub
 
 void initialize_grid(vector<vector<double>> &grid, double mean){
     static mt19937 g(time(nullptr));  
+    // static mt19937 g(42); 
     double mean_dist = 0;
     double stddev = 0.2;
     normal_distribution<double> dist(mean_dist, stddev);
@@ -98,6 +115,7 @@ void initialize_grid(vector<vector<double>> &grid, double mean){
 void initialize_3Dgrid(vector<vector<vector<double>>> &grid){
   random_device rd;  
   mt19937 g(time(nullptr));   
+  // mt19937 g(42); 
   double lower_bound = 0.0;
   double upper_bound = 2*PI;
   uniform_real_distribution<double> dist(lower_bound, upper_bound);   
@@ -145,17 +163,26 @@ void update_density(vector<vector<double>> &rho_old, vector<vector<double>> &rho
   }
 }
 
-void non_linear(vector<vector<double>> &rho, vector<vector<vector<double>>> &polarization_field, vector<vector<vector<double>>> &result){
+void non_linear(vector<vector<double>> &rho, vector<vector<vector<double>>> &polarization_field, vector<vector<vector<double>>> &result, vector<vector<double>> &activity_field ){
+    
+    vector<vector<vector<double>>> polarization_field_mod(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
+    for(int i=0;i<Ny;i++){
+      for(int j=0;j<Nx;j++){
+        polarization_field_mod[i][j][0] = polarization_field[i][j][0]*activity_field[i][j];
+        polarization_field_mod[i][j][1] = polarization_field[i][j][1]*activity_field[i][j];
+      }
+    }
+  
     vector<vector<double>> del_t_xx(Ny, vector<double>(Nx, -1));
     vector<vector<double>> del_t_yx(Ny, vector<double>(Nx, -1));
     vector<vector<double>> del_t_xy(Ny, vector<double>(Nx, -1));
     vector<vector<double>> del_t_yy(Ny, vector<double>(Nx, -1));
     for(int i=0;i<Ny;i++){
       for(int j=0;j<Nx;j++){
-        del_t_yy[i][j] = (polarization_field[get_periodic_index(i+1,Ny)][j][1]-polarization_field[get_periodic_index(i-1,Ny)][j][1])/(2*spacing);
-        del_t_yx[i][j] = (polarization_field[i][get_periodic_index(j+1,Nx)][1]-polarization_field[i][get_periodic_index(j-1,Nx)][1])/(2*spacing);
-        del_t_xx[i][j] = (polarization_field[i][get_periodic_index(j+1,Nx)][0]-polarization_field[i][get_periodic_index(j-1,Nx)][0])/(2*spacing);
-        del_t_xy[i][j] = (polarization_field[get_periodic_index(i+1,Ny)][j][0]-polarization_field[get_periodic_index(i-1,Ny)][j][0])/(2*spacing);
+        del_t_yy[i][j] = (polarization_field_mod[get_periodic_index(i+1,Ny)][j][1]-polarization_field_mod[get_periodic_index(i-1,Ny)][j][1])/(2*spacing);
+        del_t_yx[i][j] = (polarization_field_mod[i][get_periodic_index(j+1,Nx)][1]-polarization_field_mod[i][get_periodic_index(j-1,Nx)][1])/(2*spacing);
+        del_t_xx[i][j] = (polarization_field_mod[i][get_periodic_index(j+1,Nx)][0]-polarization_field_mod[i][get_periodic_index(j-1,Nx)][0])/(2*spacing);
+        del_t_xy[i][j] = (polarization_field_mod[get_periodic_index(i+1,Ny)][j][0]-polarization_field_mod[get_periodic_index(i-1,Ny)][j][0])/(2*spacing);
       }
     }
     vector<vector<vector<double>>> rho_grad(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
@@ -172,17 +199,24 @@ void non_linear(vector<vector<double>> &rho, vector<vector<vector<double>>> &pol
 
 void update_T(vector<vector<double>> &rho, vector<vector<vector<double>>> &polarization_field_old, vector<vector<vector<double>>> &polarization_field_new, vector<vector<double>> &activity_field){
   vector<vector<vector<double>>> nonlinearterms(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
-  non_linear(rho,polarization_field_old, nonlinearterms);
+  non_linear(rho,polarization_field_old, nonlinearterms, activity_field);
   vector<vector<vector<double>>> result(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
-  laplacian(polarization_field_old,result);
-  vector<vector<double>> wrho(Ny, vector<double>(Nx, -1));
+  vector<vector<vector<double>>> polarization_field_mod(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
   for(int i=0;i<Ny;i++){
-    for(int j=0;j<Nx;j++){
-      wrho[i][j] = activity_field[i][j]*rho[i][j];
+      for(int j=0;j<Nx;j++){
+        polarization_field_mod[i][j][0] = polarization_field_old[i][j][0]*activity_field[i][j];
+        polarization_field_mod[i][j][1] = polarization_field_old[i][j][1]*activity_field[i][j];
+      }
     }
-  }
-  vector<vector<vector<double>>> divwrho(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
-  gradient(wrho, divwrho);
+  laplacian(polarization_field_mod,result);
+  // vector<vector<double>> wrho(Ny, vector<double>(Nx, -1));
+  // for(int i=0;i<Ny;i++){
+  //   for(int j=0;j<Nx;j++){
+  //     wrho[i][j] = activity_field[i][j]*rho[i][j];
+  //   }
+  // }
+  // vector<vector<vector<double>>> divwrho(Ny,vector<vector<double>>(Nx, vector<double>(2, -1)));
+  // gradient(wrho, divwrho);
   
   for(int i=0;i<Ny;i++){
     for(int j=0;j<Nx;j++){
@@ -190,7 +224,7 @@ void update_T(vector<vector<double>> &rho, vector<vector<vector<double>>> &polar
         result[i][j][k] = result[i][j][k]*rho[i][j];
         result[i][j][k] += nonlinearterms[i][j][k];
         result[i][j][k] += polarization_field_old[i][j][k]*C*(1-(polarization_field_old[i][j][0]*polarization_field_old[i][j][0] + polarization_field_old[i][j][1]*polarization_field_old[i][j][1]));
-        result[i][j][k] -= divwrho[i][j][k];
+        // result[i][j][k] -= divwrho[i][j][k];
         polarization_field_new[i][j][k] = polarization_field_old[i][j][k] + delta_t*result[i][j][k];
       }
     }
@@ -198,20 +232,21 @@ void update_T(vector<vector<double>> &rho, vector<vector<vector<double>>> &polar
   return;
 }
 
-void update_activity(vector<vector<double>> &activity_field){
-  for(int i=0;i<Ny;i++){
-    for(int j=0;j<Nx;j++){
-        activity_field[i][j] = activity_constant;
+void save_activity_field(vector<vector<double>> &activity_field, string folder_path, int idx){
+    string activity_field_path = "activity_field_"+to_string(idx)+".bin";
+    ofstream outFile(folder_path+activity_field_path, ios::binary);
+
+    for (const auto &row : activity_field) {
+            outFile.write(reinterpret_cast<const char *>(row.data()), row.size() * sizeof(double));
     }
-  }
-  return;
+    outFile.close();
 }
 
 
 
 int main(){
 
-  string folder_path = "C:\\PhD\\Work\\KardarAster\\";
+  string folder_path = "C:\\PhD\\Work\\KardarAsterModified4\\";
   string command = "mkdir "+folder_path;
 
   try{
@@ -230,9 +265,11 @@ int main(){
   initialize_grid(rho_t,density_mean);
   initialize_3Dgrid(polarization_field_t);
   update_activity(activity_field);
+  save_activity_field(activity_field, folder_path, 0);
+  
   
   for(int t = 0; t< timesteps;t++){
-    if(t%10000==0){
+    if(t%20000==0 || t== timesteps-1){
         savevectors(rho_t, polarization_field_t, folder_path, t);
     }
     update_density(rho_t,rho_t1,polarization_field_t, activity_field);
@@ -250,7 +287,7 @@ int main(){
         sum+= rho_t1[i][j];
       }
     }
-    if(t%10000==0){
+    if(t%100000==0 || t==timesteps-1){
       cout << sum << ' ' << t <<  '\n';
     }
   }
